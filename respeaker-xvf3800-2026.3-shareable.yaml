@@ -1,0 +1,1711 @@
+# =============================================================================
+# ReSpeaker XVF3800 ESPHome Configuration
+# Compatible with: ESPHome 2026.3.x
+# Hardware: Seeed Studio ReSpeaker XVF3800 4-Mic Array with XIAO ESP32-S3
+# Based on: formatBCE Respeaker XVF3800 Satellite
+# https://github.com/formatBCE/Respeaker-XVF3800-ESPHome-integration
+#
+# CHANGES FROM ORIGINAL (required for ESPHome 2026.3.x compatibility):
+#
+# 1. sensor.template.publish action replaced with lambda calling
+#    publish_state() directly — action was removed in ESPHome 2026.3.x
+#
+# 2. !lambda tags inside script.execute parameter blocks replaced with
+#    C++ lambda calls using the execute() API directly. The stricter
+#    2026.3.x YAML parser rejects !lambda as a tag in these positions.
+#
+# 3. !lambda tags inside homeassistant.event data blocks replaced with
+#    global string buffers (wake_word_buf, tts_uri_buf, stt_text_buf)
+#    set by a preceding lambda. Three globals added to support this.
+#
+# 4. voice_assistant.start wake_word parameter kept as
+#    !lambda "return wake_word;" — this position is valid in 2026.3.x.
+#
+# 5. Optional 3.5mm headphone jack routing via AIC3104 I2C registers
+#    added in on_boot section (commented out by default).
+#
+# NOTE: This config uses experimental ESPHome components from formatBCE's
+# and kahrendt's git forks (sendspin, media_source, speaker_source).
+# These are NOT in mainline ESPHome. The specific git refs used here were
+# chosen by formatBCE to work with ESPHome 2026.3.x. If ESPHome updates
+# and breaks these refs, check formatBCE's repo for updated commits.
+# =============================================================================
+
+substitutions:
+  # ---------------------------------------------------------------------------
+  # Voice Assistant Phase IDs
+  # These map to LED effect states. Do not change unless you also update
+  # the control_leds script logic below.
+  # ---------------------------------------------------------------------------
+  voice_assist_idle_phase_id: '1'
+  voice_assist_waiting_for_command_phase_id: '2'
+  voice_assist_listening_for_command_phase_id: '3'
+  voice_assist_thinking_phase_id: '4'
+  voice_assist_replying_phase_id: '5'
+  voice_assist_not_ready_phase_id: '10'
+  voice_assist_error_phase_id: '11'
+
+  # ---------------------------------------------------------------------------
+  # Set to "true" if your WiFi SSID is hidden (not broadcast)
+  # ---------------------------------------------------------------------------
+  hidden_ssid: "false"
+
+  # ---------------------------------------------------------------------------
+  # Sound files — pulled from the Home Assistant Voice PE sounds repo.
+  # These are downloaded at compile time and embedded in the firmware.
+  # If you want custom sounds, replace these URLs with your own .flac files.
+  # ---------------------------------------------------------------------------
+  mute_switch_on_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/mute_switch_on.flac
+  mute_switch_off_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/mute_switch_off.flac
+  timer_finished_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+  wake_word_triggered_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/wake_word_triggered.flac
+  center_button_press_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_press.flac
+  center_button_double_press_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_double_press.flac
+  center_button_triple_press_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_triple_press.flac
+  center_button_long_press_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_long_press.flac
+  factory_reset_initiated_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/factory_reset_initiated.mp3
+  factory_reset_cancelled_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/factory_reset_cancelled.mp3
+  factory_reset_confirmed_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/factory_reset_confirmed.mp3
+  error_cloud_expired_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/error_cloud_expired.mp3
+
+esphome:
+  name: respeaker-xvf3800
+  friendly_name: ReSpeaker XVF3800
+  project:
+    name: formatbce.Respeaker XVF3800 Satellite
+    version: 2026.3.0
+  min_version: 2026.3.0
+  on_boot:
+    - priority: 375
+      then:
+        # CHANGED 2026.3.x: sensor.template.publish was removed.
+        # Using publish_state() via lambda instead.
+        - lambda: |-
+            id(next_timer).publish_state(-1);
+        - script.execute: control_leds
+        - delay: 10min
+        - if:
+            condition:
+              lambda: return id(init_in_progress);
+            then:
+              - lambda: id(init_in_progress) = false;
+              - script.execute: control_leds
+
+    # -------------------------------------------------------------------------
+    # OPTIONAL: 3.5mm headphone jack audio output
+    # -------------------------------------------------------------------------
+    # By default the XVF3800 outputs audio through the JST speaker connector.
+    # If you want to use the 3.5mm headphone jack instead, uncomment the
+    # priority 600 block below. It writes to the AIC3104 codec registers via
+    # I2C at boot to reroute audio output before the pipeline initializes.
+    #
+    # DO NOT uncomment this if you are using the JST speaker connector —
+    # it will redirect audio away from it.
+    # -------------------------------------------------------------------------
+    # - priority: 600
+    #   then:
+    #     - lambda: |-
+    #         i2c::I2CDevice dev;
+    #         dev.set_i2c_bus(id(internal_i2c));
+    #         dev.set_i2c_address(0x18);  // AIC3104 I2C address
+    #         dev.write_byte(0x00, 0x01); // Select page 1
+    #         dev.write_byte(0x10, 0x40); // Route DAC_L to HPL
+    #         dev.write_byte(0x11, 0x40); // Route DAC_R to HPR
+    #         dev.write_byte(0x12, 0x00); // Disconnect LOL output
+    #         dev.write_byte(0x13, 0x00); // Disconnect LOR output
+    #         dev.write_byte(0x09, 0x0C); // Power up HPL and HPR drivers
+    #         dev.write_byte(0x00, 0x00); // Return to page 0
+
+    - priority: -100
+      then:
+        - lambda: |-
+            auto call = id(alarm_action).make_call();
+            call.set_option(id(saved_alarm_action));
+            call.perform();
+        - lambda: |-
+            setenv("TZ", id(saved_time_zone).c_str(), 1);
+            tzset();
+
+esp32:
+  board: esp32-s3-devkitc-1
+  cpu_frequency: 240MHz
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+    version: recommended
+    components:
+      - espressif/esp-nn==1.1.2
+    sdkconfig_options:
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+      CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST: "y"
+      CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY: "y"
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
+      CONFIG_MBEDTLS_SSL_PROTO_TLS1_3: "y"
+
+wifi:
+  id: wifi_id
+  fast_connect: ${hidden_ssid}
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+  reboot_timeout: 10min
+  on_connect:
+    - lambda: id(improv_ble_in_progress) = false;
+    - script.execute: control_leds
+  on_disconnect:
+    - script.execute: control_leds
+
+network:
+  enable_ipv6: true
+
+logger:
+  level: INFO
+  initial_level: INFO
+  logs:
+    sensor: WARN
+    voice_assistant: INFO
+    micro_wake_word: INFO
+    i2s_audio: WARN
+    respeaker_xvf3800: INFO
+
+api:
+  id: api_id
+  encryption:
+    key: !secret api_key
+  actions:
+    - action: set_led_color
+      variables:
+        red: float
+        green: float
+        blue: float
+      then:
+        - lambda: |-
+            id(user_led_ring_color_r) = std::min(255.0f, std::max(0.0f, red));
+            id(user_led_ring_color_g) = std::min(255.0f, std::max(0.0f, green));
+            id(user_led_ring_color_b) = std::min(255.0f, std::max(0.0f, blue));
+        - select.set:
+            id: user_led_color_preset
+            option: "Custom"
+    - action: start_va
+      then:
+        - voice_assistant.start
+    - action: stop_va
+      then:
+        - voice_assistant.stop
+    - action: set_time_zone
+      variables:
+        posix_time_zone: string
+      then:
+        - lambda: |-
+            setenv("TZ", posix_time_zone.c_str(), 1);
+            tzset();
+            id(saved_time_zone) = posix_time_zone;
+            id(publish_current_time).execute();
+  on_client_connected:
+    - script.execute: control_leds
+  on_client_disconnected:
+    - script.execute: control_leds
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+    password: !secret ota_password
+
+i2c:
+  - id: internal_i2c
+    sda: GPIO5
+    scl: GPIO6
+    scan: true
+    frequency: 100kHz
+
+psram:
+  mode: octal
+  speed: 80MHz
+  ignore_not_found: false
+
+globals:
+  - id: user_led_ring_color_r
+    type: float
+    restore_value: yes
+    initial_value: '255.0'
+  - id: user_led_ring_color_g
+    type: float
+    restore_value: yes
+    initial_value: '0.0'
+  - id: user_led_ring_color_b
+    type: float
+    restore_value: yes
+    initial_value: '255.0'
+  - id: effect_color_r
+    type: float
+    restore_value: no
+    initial_value: '255.0'
+  - id: effect_color_g
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  - id: effect_color_b
+    type: float
+    restore_value: no
+    initial_value: '255.0'
+  - id: effect_brightness
+    type: float
+    restore_value: no
+    initial_value: '1.0'
+  - id: effect_speed
+    type: float
+    restore_value: yes
+    initial_value: "0.05"
+  - id: init_in_progress
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  - id: improv_ble_in_progress
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: voice_assistant_phase
+    type: int
+    restore_value: no
+    initial_value: ${voice_assist_not_ready_phase_id}
+  - id: saved_time_zone
+    type: std::string
+    restore_value: yes
+    initial_value: '"UTC0"'
+  - id: saved_alarm_action
+    type: std::string
+    restore_value: yes
+    initial_value: '"Play sound"'
+  - id: first_active_timer
+    type: voice_assistant::Timer
+    restore_value: no
+  - id: is_timer_active
+    type: bool
+    restore_value: no
+  - id: factory_reset_requested
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: current_led_effect
+    type: std::string
+    restore_value: no
+    initial_value: '"off"'
+  - id: volume_display_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: last_led_update_time
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: animated_beam_position
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  # CHANGED 2026.3.x: String buffers for homeassistant.event dynamic data.
+  # !lambda tags are not valid inside event data blocks in ESPHome 2026.3.x.
+  # These are set by a preceding lambda before the event fires.
+  - id: wake_word_buf
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  - id: tts_uri_buf
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  - id: stt_text_buf
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+    on_time:
+      - seconds: 0
+        then:
+          - script.execute: check_alarm
+    on_time_sync:
+      - script.execute: publish_current_time
+
+datetime:
+  - platform: template
+    icon: mdi:bell-ring
+    name: "Alarm time"
+    id: alarm_time
+    type: time
+    initial_value: "00:00:00"
+    restore_value: true
+    optimistic: true
+    internal: false
+    set_action:
+      then:
+        - switch.turn_on: alarm_on
+
+switch:
+  - platform: template
+    id: mute_sound
+    name: Mute-unmute sound
+    icon: "mdi:bullhorn"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: wake_sound
+    name: Wake sound
+    icon: "mdi:bullhorn"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: timer_ringing
+    optimistic: true
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+      - micro_wake_word.disable_model: stop
+      - script.execute: disable_repeat
+      - if:
+          condition:
+            media_player.is_announcing:
+              id: external_media_player
+          then:
+            media_player.stop:
+              announcement: true
+              id: external_media_player
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 0
+          duration: 1.0s
+      - script.execute: control_leds
+    on_turn_on:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 20
+          duration: 0.0s
+      - micro_wake_word.enable_model: stop
+      - script.execute: ring_timer
+      - script.execute: control_leds
+      - delay: 15min
+      - switch.turn_off: timer_ringing
+  - platform: template
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    id: alarm_on
+    icon: mdi:bell-badge
+    name: "Alarm on"
+
+binary_sensor:
+
+number:
+  - platform: template
+    id: user_led_ring_brightness
+    name: "LED Ring Brightness"
+    icon: mdi:brightness-6
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    min_value: 0.4
+    max_value: 1.0
+    step: 0.05
+    initial_value: 0.8
+    mode: slider
+
+sensor:
+  - platform: template
+    id: next_timer
+    name: "Next timer"
+    update_interval: never
+    disabled_by_default: true
+    device_class: duration
+    unit_of_measurement: s
+    icon: "mdi:timer"
+    accuracy_decimals: 0
+
+text_sensor:
+  - platform: template
+    id: next_timer_name
+    name: "Next timer name"
+    icon: "mdi:timer"
+    disabled_by_default: true
+  - platform: template
+    name: "Current device time"
+    id: current_time
+    icon: mdi:clock
+
+interval:
+  - interval: 50ms
+    id: led_animation_interval
+    then:
+      - lambda: |-
+          if (id(volume_display_active)) {
+            id(update_volume_display_effect).execute();
+            return;
+          }
+          std::string effect = id(current_led_effect);
+          if (effect == "off") {
+            return;
+          } else if (effect == "breathe") {
+            id(update_breathe_effect).execute();
+          } else if (effect == "rainbow") {
+            id(update_rainbow_effect).execute();
+          } else if (effect == "comet_cw") {
+            id(update_comet_cw_effect).execute();
+          } else if (effect == "comet_ccw") {
+            id(update_comet_ccw_effect).execute();
+          } else if (effect == "twinkle") {
+            id(update_twinkle_effect).execute();
+          } else if (effect == "timer_tick") {
+            id(update_timer_tick_effect).execute();
+          } else if (effect == "led_beam") {
+            id(update_led_beam_effect).execute();
+          }
+
+script:
+  - id: led_set_effect
+    mode: restart
+    parameters:
+      effect: std::string
+      r: float
+      g: float
+      b: float
+      speed: float
+      brightness: float
+    then:
+      - lambda: |-
+          id(effect_color_r) = r;
+          id(effect_color_g) = g;
+          id(effect_color_b) = b;
+          id(effect_speed) = speed;
+          id(effect_brightness) = brightness;
+          id(current_led_effect) = effect;
+          if (effect == "off") {
+            uint32_t colors[12] = {0};
+            id(respeaker).set_led_ring(colors);
+          } else {
+            id(last_led_update_time) = millis();
+          }
+
+  - id: update_breathe_effect
+    then:
+      - lambda: |-
+          static float phase = 0.0f;
+          uint32_t now = millis();
+          float dt = (now - id(last_led_update_time)) / 1000.0f;
+          id(last_led_update_time) = now;
+          phase += dt * id(effect_speed);
+          while (phase >= 1.0f) phase -= 1.0f;
+          float master_brightness = id(user_led_ring_brightness).state * id(effect_brightness);
+          float breath_brightness = 0.5f * (1.0f + sinf(phase * 2.0f * M_PI)) * master_brightness;
+          uint8_t r = (uint8_t)(id(effect_color_r) * breath_brightness);
+          uint8_t g = (uint8_t)(id(effect_color_g) * breath_brightness);
+          uint8_t b = (uint8_t)(id(effect_color_b) * breath_brightness);
+          uint32_t current_color = (r << 16) | (g << 8) | b;
+          uint32_t colors[12];
+          for (int i = 0; i < 12; i++) colors[i] = current_color;
+          id(respeaker).set_led_ring(colors);
+
+  - id: update_rainbow_effect
+    then:
+      - lambda: |-
+          static float hue_offset = 0.0f;
+          uint32_t now = millis();
+          float dt = (now - id(last_led_update_time)) / 1000.0f;
+          id(last_led_update_time) = now;
+          hue_offset += dt * id(effect_speed);
+          if (hue_offset >= 1.0f) hue_offset -= 1.0f;
+          constexpr int NUM_LEDS = 12;
+          constexpr float HUE_STEP = 1.0f / NUM_LEDS;
+          uint32_t colors[NUM_LEDS];
+          float brightness = id(user_led_ring_brightness).state * id(effect_brightness);
+          float current_hue = hue_offset;
+          for (int i = 0; i < NUM_LEDS; i++) {
+            float r, g, b;
+            if (current_hue >= 1.0f) current_hue -= 1.0f;
+            hsv_to_rgb((int)(current_hue * 360.0f), 1.0f, brightness, r, g, b);
+            colors[i] = ((uint8_t)(r * 255.0f) << 16) | ((uint8_t)(g * 255.0f) << 8) | ((uint8_t)(b * 255.0f));
+            current_hue += HUE_STEP;
+          }
+          id(respeaker).set_led_ring(colors);
+
+  - id: update_comet_cw_effect
+    then:
+      - lambda: |-
+          static float comet_pos = 0.0f;
+          uint32_t now = millis();
+          float dt = (now - id(last_led_update_time)) / 1000.0f;
+          id(last_led_update_time) = now;
+          constexpr int NUM_LEDS = 12;
+          constexpr int BASE_TAIL = 3;
+          float leds_per_sec = id(effect_speed) * NUM_LEDS;
+          comet_pos += dt * leds_per_sec;
+          while (comet_pos >= NUM_LEDS) comet_pos -= NUM_LEDS;
+          int head_index = (int)comet_pos;
+          int tail_length = BASE_TAIL + (int)(id(effect_speed));
+          if (tail_length > NUM_LEDS - 1) tail_length = NUM_LEDS - 1;
+          uint32_t colors[NUM_LEDS] = {0};
+          float brightness = id(user_led_ring_brightness).state * id(effect_brightness);
+          uint8_t head_r = (uint8_t)(id(effect_color_r) * brightness);
+          uint8_t head_g = (uint8_t)(id(effect_color_g) * brightness);
+          uint8_t head_b = (uint8_t)(id(effect_color_b) * brightness);
+          colors[head_index % NUM_LEDS] = (head_r << 16) | (head_g << 8) | head_b;
+          for (int i = 1; i <= tail_length; i++) {
+            float tail_factor = (float)i / (tail_length + 1);
+            float tail_brightness = (1.0f - tail_factor) * brightness;
+            uint8_t r = (uint8_t)(id(effect_color_r) * tail_brightness);
+            uint8_t g = (uint8_t)(id(effect_color_g) * tail_brightness);
+            uint8_t b = (uint8_t)(id(effect_color_b) * tail_brightness);
+            int tail_index = (head_index - i + NUM_LEDS) % NUM_LEDS;
+            colors[tail_index] = (r << 16) | (g << 8) | b;
+          }
+          id(respeaker).set_led_ring(colors);
+
+  - id: update_comet_ccw_effect
+    then:
+      - lambda: |-
+          static float comet_pos = 0.0f;
+          uint32_t now = millis();
+          float dt = (now - id(last_led_update_time)) / 1000.0f;
+          id(last_led_update_time) = now;
+          constexpr int NUM_LEDS = 12;
+          constexpr int BASE_TAIL = 3;
+          float leds_per_sec = id(effect_speed) * NUM_LEDS;
+          comet_pos -= dt * leds_per_sec;
+          while (comet_pos < 0.0f) comet_pos += NUM_LEDS;
+          int head_index = (int)comet_pos;
+          int tail_length = BASE_TAIL + (int)(id(effect_speed));
+          if (tail_length > NUM_LEDS - 1) tail_length = NUM_LEDS - 1;
+          uint32_t colors[NUM_LEDS] = {0};
+          float brightness = id(user_led_ring_brightness).state * id(effect_brightness);
+          uint8_t head_r = (uint8_t)(id(effect_color_r) * brightness);
+          uint8_t head_g = (uint8_t)(id(effect_color_g) * brightness);
+          uint8_t head_b = (uint8_t)(id(effect_color_b) * brightness);
+          colors[head_index % NUM_LEDS] = (head_r << 16) | (head_g << 8) | head_b;
+          for (int i = 1; i <= tail_length; i++) {
+            float tail_factor = (float)i / (tail_length + 1);
+            float tail_brightness = (1.0f - tail_factor) * brightness;
+            uint8_t r = (uint8_t)(id(effect_color_r) * tail_brightness);
+            uint8_t g = (uint8_t)(id(effect_color_g) * tail_brightness);
+            uint8_t b = (uint8_t)(id(effect_color_b) * tail_brightness);
+            int tail_index = (head_index + i) % NUM_LEDS;
+            colors[tail_index] = (r << 16) | (g << 8) | b;
+          }
+          id(respeaker).set_led_ring(colors);
+
+  - id: update_twinkle_effect
+    then:
+      - lambda: |-
+          constexpr int NUM_LEDS = 12;
+          static float led_brightness[NUM_LEDS] = {0.0f};
+          static float led_fade_speed[NUM_LEDS] = {0.0f};
+          uint32_t now = millis();
+          float dt = (now - id(last_led_update_time)) / 1000.0f;
+          id(last_led_update_time) = now;
+          for (int i = 0; i < NUM_LEDS; i++) {
+            if (led_fade_speed[i] != 0.0f) {
+              led_brightness[i] += led_fade_speed[i] * dt;
+              if (led_fade_speed[i] > 0.0f && led_brightness[i] >= 1.0f) {
+                led_brightness[i] = 1.0f;
+                led_fade_speed[i] *= -1.0f;
+              } else if (led_fade_speed[i] < 0.0f && led_brightness[i] <= 0.0f) {
+                led_brightness[i] = 0.0f;
+                led_fade_speed[i] = 0.0f;
+              }
+            }
+          }
+          float twinkle_chance = dt * id(effect_speed);
+          if (random_float() < twinkle_chance) {
+            int led_to_start = (int)(random_float() * NUM_LEDS);
+            if (led_fade_speed[led_to_start] == 0.0f) {
+              led_brightness[led_to_start] = 0.0f;
+              float min_speed = 1.5f, max_speed = 3.0f;
+              led_fade_speed[led_to_start] = min_speed + (random_float() * (max_speed - min_speed));
+            }
+          }
+          uint32_t colors[NUM_LEDS];
+          float master_brightness = id(user_led_ring_brightness).state * id(effect_brightness);
+          for (int i = 0; i < NUM_LEDS; i++) {
+            float current_led_brightness = led_brightness[i] * master_brightness;
+            uint8_t r = (uint8_t)(id(effect_color_r) * current_led_brightness);
+            uint8_t g = (uint8_t)(id(effect_color_g) * current_led_brightness);
+            uint8_t b = (uint8_t)(id(effect_color_b) * current_led_brightness);
+            colors[i] = (r << 16) | (g << 8) | b;
+          }
+          id(respeaker).set_led_ring(colors);
+
+  - id: update_timer_tick_effect
+    then:
+      - lambda: |-
+          constexpr int NUM_LEDS = 12;
+          static int tick_index = 0;
+          uint32_t now = millis();
+          static uint32_t last_tick_update = 0;
+          if (now - last_tick_update >= 100) {
+            tick_index = (tick_index - 1 + NUM_LEDS) % NUM_LEDS;
+            last_tick_update = now;
+          }
+          uint32_t colors[NUM_LEDS] = {0};
+          uint32_t seconds_left = id(first_active_timer).seconds_left;
+          uint32_t total_seconds = id(first_active_timer).total_seconds;
+          float timer_ratio = (float)NUM_LEDS * seconds_left / std::max(total_seconds, (uint32_t)1);
+          float master_brightness = id(user_led_ring_brightness).state * id(effect_brightness);
+          for (int i = 0; i < NUM_LEDS; i++) {
+            float bar_brightness = clamp(timer_ratio - i, 0.0f, 1.0f);
+            if (bar_brightness > 0.0f) {
+              float tick_dip = (i == tick_index) ? 0.9f : 1.0f;
+              float final_brightness = bar_brightness * tick_dip * master_brightness;
+              uint8_t r = (uint8_t)(id(effect_color_r) * final_brightness);
+              uint8_t g = (uint8_t)(id(effect_color_g) * final_brightness);
+              uint8_t b = (uint8_t)(id(effect_color_b) * final_brightness);
+              colors[i] = (r << 16) | (g << 8) | b;
+            }
+          }
+          id(respeaker).set_led_ring(colors);
+
+  - id: update_volume_display_effect
+    then:
+      - lambda: |-
+          constexpr int NUM_LEDS = 12;
+          uint32_t colors[NUM_LEDS] = {0};
+          if (id(external_media_player).is_ready()) {
+            bool is_muted = id(external_media_player).is_muted();
+            float volume = id(external_media_player).volume;
+            if (is_muted || volume == 0.0f) {
+              uint32_t mute_color = (255 << 16);
+              colors[0] = mute_color;
+              colors[6] = mute_color;
+            } else {
+              float num_leds_on = volume * NUM_LEDS;
+              float master_brightness = id(user_led_ring_brightness).state;
+              for (int i = 0; i < NUM_LEDS; i++) {
+                float brightness = clamp(num_leds_on - i, 0.0f, 1.0f);
+                if (brightness > 0.0f) {
+                  uint8_t r = (uint8_t)(id(user_led_ring_color_r) * brightness * master_brightness);
+                  uint8_t g = (uint8_t)(id(user_led_ring_color_g) * brightness * master_brightness);
+                  uint8_t b = (uint8_t)(id(user_led_ring_color_b) * brightness * master_brightness);
+                  colors[i] = (r << 16) | (g << 8) | b;
+                }
+              }
+            }
+          }
+          id(respeaker).set_led_ring(colors);
+
+  - id: update_led_beam_effect
+    then:
+      - lambda: |-
+          constexpr int NUM_LEDS = 12;
+          constexpr int FADE_LEDS = 3;
+          constexpr float TRANSITION_DURATION = 0.5f;
+          uint32_t colors[NUM_LEDS] = {0};
+          uint32_t now = millis();
+          float dt = (now - id(last_led_update_time)) / 1000.0f;
+          id(last_led_update_time) = now;
+          if (id(beam_direction).has_state()) {
+            float target_pos = ((int)id(beam_direction).state + 5) % NUM_LEDS;
+            float current_pos = id(animated_beam_position);
+            float diff = target_pos - current_pos;
+            if (diff > NUM_LEDS / 2.0f) {
+              diff -= NUM_LEDS;
+            } else if (diff < -NUM_LEDS / 2.0f) {
+              diff += NUM_LEDS;
+            }
+            if (abs(diff) > 0.01f) {
+              float move_speed = diff / TRANSITION_DURATION;
+              current_pos += move_speed * dt;
+            } else {
+              current_pos = target_pos;
+            }
+            if (current_pos >= NUM_LEDS) current_pos -= NUM_LEDS;
+            if (current_pos < 0.0f) current_pos += NUM_LEDS;
+            id(animated_beam_position) = current_pos;
+            float master_brightness = id(user_led_ring_brightness).state * id(effect_brightness);
+            for (int i = 0; i < NUM_LEDS; i++) {
+              float dist = abs(i - current_pos);
+              if (dist > NUM_LEDS / 2.0f) {
+                dist = NUM_LEDS - dist;
+              }
+              float brightness_factor = 1.0f - (dist / (FADE_LEDS + 1.0f));
+              brightness_factor = std::max(0.0f, brightness_factor);
+              if (brightness_factor > 0.0f) {
+                float final_brightness = brightness_factor * master_brightness;
+                uint8_t r = (uint8_t)(id(effect_color_r) * final_brightness);
+                uint8_t g = (uint8_t)(id(effect_color_g) * final_brightness);
+                uint8_t b = (uint8_t)(id(effect_color_b) * final_brightness);
+                colors[i] = (r << 16) | (g << 8) | b;
+              }
+            }
+          }
+          id(respeaker).set_led_ring(colors);
+
+  - id: control_leds
+    mode: single
+    then:
+      - lambda: |
+          static bool last_respeaker_failed = false;
+          static bool last_wifi_connected = false;
+          static bool last_api_connected = false;
+          static int last_voice_phase = -1;
+          static bool last_timer_ringing = false;
+          static bool last_timer_active = false;
+          static bool last_improv_ble = false;
+          static bool last_init_progress = false;
+          bool respeaker_failed = id(respeaker).is_failed();
+          bool wifi_connected = id(wifi_id).is_connected();
+          bool api_connected = id(api_id).is_connected();
+          int voice_phase = id(voice_assistant_phase);
+          bool new_timer_ringing = id(timer_ringing).state;
+          bool improv_ble = id(improv_ble_in_progress);
+          bool init_progress = id(init_in_progress);
+          bool needs_update = (
+            respeaker_failed != last_respeaker_failed ||
+            wifi_connected != last_wifi_connected ||
+            api_connected != last_api_connected ||
+            voice_phase != last_voice_phase ||
+            new_timer_ringing != last_timer_ringing ||
+            improv_ble != last_improv_ble ||
+            init_progress != last_init_progress
+          );
+          if (!needs_update) return;
+          last_respeaker_failed = respeaker_failed;
+          last_wifi_connected = wifi_connected;
+          last_api_connected = api_connected;
+          last_voice_phase = voice_phase;
+          last_timer_ringing = new_timer_ringing;
+          last_improv_ble = improv_ble;
+          last_init_progress = init_progress;
+          if (respeaker_failed) {
+            id(control_leds_respeaker_startup_failed).execute();
+            return;
+          }
+          id(check_if_timers_active).execute();
+          if (id(is_timer_active)){
+            id(fetch_first_active_timer).execute();
+          }
+          if (improv_ble) {
+            id(control_leds_improv_ble_state).execute();
+          } else if (init_progress) {
+            id(control_leds_init_state).execute();
+          } else if (!wifi_connected || !api_connected){
+            id(control_leds_no_ha_connection_state).execute();
+          } else if (new_timer_ringing) {
+            id(control_leds_timer_ringing).execute();
+          } else if (voice_phase == ${voice_assist_waiting_for_command_phase_id}) {
+            id(control_leds_voice_assistant_waiting_for_command_phase).execute();
+          } else if (voice_phase == ${voice_assist_listening_for_command_phase_id}) {
+            id(control_leds_voice_assistant_listening_for_command_phase).execute();
+          } else if (voice_phase == ${voice_assist_thinking_phase_id}) {
+            id(control_leds_voice_assistant_thinking_phase).execute();
+          } else if (voice_phase == ${voice_assist_replying_phase_id}) {
+            id(control_leds_voice_assistant_replying_phase).execute();
+          } else if (voice_phase == ${voice_assist_error_phase_id}) {
+            id(control_leds_voice_assistant_error_phase).execute();
+          } else if (voice_phase == ${voice_assist_not_ready_phase_id}) {
+            id(control_leds_voice_assistant_not_ready_phase).execute();
+          } else if (id(is_timer_active)) {
+            id(control_leds_timer_ticking).execute();
+          } else if (voice_phase == ${voice_assist_idle_phase_id}) {
+            id(control_leds_voice_assistant_idle_phase).execute();
+          }
+
+  - id: control_leds_respeaker_startup_failed
+    then:
+      - script.execute:
+          id: led_set_effect
+          effect: "breathe"
+          r: 200.0
+          g: 0.0
+          b: 0.0
+          speed: 0.5
+          brightness: 0.6
+
+  - id: control_leds_improv_ble_state
+    then:
+      - script.execute:
+          id: led_set_effect
+          effect: "twinkle"
+          r: 255.0
+          g: 200.0
+          b: 160.0
+          speed: 10.0
+          brightness: 0.8
+
+  - id: control_leds_init_state
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - script.execute:
+                id: led_set_effect
+                effect: "twinkle"
+                r: 20.0
+                g: 200.0
+                b: 250.0
+                speed: 20.0
+                brightness: 1.0
+          else:
+            - script.execute:
+                id: led_set_effect
+                effect: "twinkle"
+                r: 20.0
+                g: 200.0
+                b: 250.0
+                speed: 4.0
+                brightness: 0.6
+
+  - id: control_leds_no_ha_connection_state
+    then:
+      - script.execute:
+          id: led_set_effect
+          effect: "twinkle"
+          r: 255.0
+          g: 0.0
+          b: 0.0
+          speed: 10.0
+          brightness: 0.4
+
+  # CHANGED 2026.3.x: !lambda in script.execute parameter positions is rejected
+  # by the 2026.3.x YAML parser. These LED scripts use C++ execute() calls
+  # to pass user color globals directly instead.
+  - id: control_leds_voice_assistant_waiting_for_command_phase
+    then:
+      - lambda: |
+          id(animated_beam_position) = id(beam_direction).state;
+      - lambda: |-
+          id(led_set_effect).execute(
+            std::string("led_beam"),
+            id(user_led_ring_color_r),
+            id(user_led_ring_color_g),
+            id(user_led_ring_color_b),
+            0.0f, 0.8f
+          );
+
+  - id: control_leds_voice_assistant_listening_for_command_phase
+    then:
+      - lambda: |-
+          id(led_set_effect).execute(
+            std::string("led_beam"),
+            id(user_led_ring_color_r),
+            id(user_led_ring_color_g),
+            id(user_led_ring_color_b),
+            0.0f, 1.0f
+          );
+
+  - id: control_leds_voice_assistant_thinking_phase
+    then:
+      - lambda: |-
+          id(led_set_effect).execute(
+            std::string("breathe"),
+            id(user_led_ring_color_r),
+            id(user_led_ring_color_g),
+            id(user_led_ring_color_b),
+            1.0f, 0.6f
+          );
+
+  - id: control_leds_voice_assistant_replying_phase
+    then:
+      - lambda: |-
+          id(led_set_effect).execute(
+            std::string("comet_ccw"),
+            id(user_led_ring_color_r),
+            id(user_led_ring_color_g),
+            id(user_led_ring_color_b),
+            1.0f, 0.8f
+          );
+
+  - id: control_leds_voice_assistant_error_phase
+    then:
+      - script.execute:
+          id: led_set_effect
+          effect: "breathe"
+          r: 255.0
+          g: 0.0
+          b: 0.0
+          speed: 3.0
+          brightness: 0.8
+
+  - id: control_leds_voice_assistant_not_ready_phase
+    then:
+      - script.execute:
+          id: led_set_effect
+          effect: "twinkle"
+          r: 255.0
+          g: 0.0
+          b: 0.0
+          speed: 5.0
+          brightness: 0.8
+
+  - id: control_leds_volume_changed
+    mode: restart
+    then:
+      - lambda: |-
+          id(volume_display_active) = true;
+      - delay: 2s
+      - lambda: |-
+          id(volume_display_active) = false;
+          uint32_t colors[12] = {0};
+          id(respeaker).set_led_ring(colors);
+
+  - id: control_leds_timer_ringing
+    then:
+      - lambda: |-
+          id(led_set_effect).execute(
+            std::string("breathe"),
+            id(user_led_ring_color_r),
+            id(user_led_ring_color_g),
+            id(user_led_ring_color_b),
+            5.0f, 1.0f
+          );
+
+  - id: control_leds_timer_ticking
+    then:
+      - lambda: |-
+          id(led_set_effect).execute(
+            std::string("timer_tick"),
+            id(user_led_ring_color_r),
+            id(user_led_ring_color_g),
+            id(user_led_ring_color_b),
+            1.0f, 0.7f
+          );
+
+  - id: control_leds_voice_assistant_idle_phase
+    then:
+      - script.execute:
+          id: led_set_effect
+          effect: "off"
+          r: 0.0
+          g: 0.0
+          b: 0.0
+          speed: 0.0
+          brightness: 0.0
+
+  - id: ring_timer
+    then:
+      - script.execute: enable_repeat_one
+      - script.execute:
+          id: play_sound
+          priority: true
+          sound_file: "timer_finished_sound"
+
+  - id: enable_repeat_one
+    then:
+      - media_player.repeat_one:
+          id: external_media_player
+          announcement: true
+      - speaker_source.set_playlist_delay:
+          id: external_media_player
+          pipeline: announcement
+          delay: 500ms
+
+  - id: disable_repeat
+    then:
+      - media_player.repeat_off:
+          id: external_media_player
+          announcement: true
+      - speaker_source.set_playlist_delay:
+          id: external_media_player
+          pipeline: announcement
+          delay: 0ms
+
+  - id: play_sound
+    parameters:
+      priority: bool
+      sound_file: string
+    then:
+      - if:
+          condition:
+            lambda: return priority;
+          then:
+            - media_player.stop:
+                id: external_media_player
+                announcement: true
+      - lambda: |-
+          if ( (id(external_media_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING ) || priority) {
+            id(external_media_player)
+              ->make_call()
+              .set_media_url("audio-file://" + sound_file)
+              .set_announcement(true)
+              .perform();
+          }
+
+  - id: fetch_first_active_timer
+    then:
+      - lambda: |
+          const auto &timers = id(va).get_timers();
+          auto output_timer = *timers.begin();
+          for (const auto &timer : timers) {
+            if (timer.is_active && timer.seconds_left <= output_timer.seconds_left) {
+              output_timer = timer;
+            }
+          }
+          id(first_active_timer) = output_timer;
+
+  - id: check_if_timers_active
+    then:
+      - lambda: |
+          const auto &timers = id(va).get_timers();
+          bool output = false;
+          for (const auto &timer : timers) {
+            if (timer.is_active) {
+              output = true;
+            }
+          }
+          id(is_timer_active) = output;
+
+  - id: activate_stop_word_once
+    then:
+      - wait_until:
+          condition:
+            media_player.is_announcing:
+              id: external_media_player
+      - delay: 1s
+      - if:
+          condition:
+            switch.is_off: timer_ringing
+          then:
+            - micro_wake_word.enable_model: stop
+            - wait_until:
+                not:
+                  media_player.is_announcing:
+                    id: external_media_player
+            - if:
+                condition:
+                  switch.is_off: timer_ringing
+                then:
+                  - micro_wake_word.disable_model: stop
+
+  - id: check_alarm
+    then:
+      - lambda: |-
+          id(publish_current_time).execute();
+          if (id(alarm_on).state) {
+            auto alarm_dt = id(alarm_time).state_as_esptime();
+            auto time_now = id(homeassistant_time).now();
+            if (time_now.hour == alarm_dt.hour && time_now.minute == alarm_dt.minute) {
+              auto action = id(alarm_action).current_option();
+              if (action == "Play sound") {
+                id(timer_ringing).turn_on();
+              } else if (action == "Send event") {
+                id(send_alarm_event).execute();
+              } else if (action == "Sound and event") {
+                id(timer_ringing).turn_on();
+                id(send_alarm_event).execute();
+              }
+            }
+          }
+
+  # CHANGED 2026.3.x: homeassistant.event data blocks cannot use !lambda tags.
+  # Dynamic values are written to global string buffers first, then read by
+  # the event data block using a global reference.
+  - id: send_wake_word_event
+    parameters:
+      wake_word: string
+    then:
+      - lambda: |-
+          id(wake_word_buf) = wake_word;
+      - homeassistant.event:
+          event: esphome.wake_word_detected
+          data:
+            wake_word: !lambda "return id(wake_word_buf);"
+  - id: send_alarm_event
+    then:
+      - homeassistant.event:
+          event: esphome.alarm_ringing
+  - id: send_tts_uri_event
+    parameters:
+      tts_uri: string
+    then:
+      - lambda: |-
+          id(tts_uri_buf) = tts_uri;
+      - homeassistant.event:
+          event: esphome.tts_uri
+          data:
+            uri: !lambda "return id(tts_uri_buf);"
+  - id: send_stt_text_event
+    parameters:
+      stt_text: string
+    then:
+      - lambda: |-
+          id(stt_text_buf) = stt_text;
+      - homeassistant.event:
+          event: esphome.stt_text
+          data:
+            text: !lambda "return id(stt_text_buf);"
+  - id: publish_current_time
+    mode: single
+    then:
+      - lambda: |-
+          static std::string last_time_string = "";
+          auto time_now = id(homeassistant_time).now();
+          std::string current_time_string = time_now.strftime("%H:%M");
+          if (current_time_string != last_time_string) {
+            id(current_time).publish_state(current_time_string);
+            last_time_string = current_time_string;
+          }
+
+i2s_audio:
+  - id: i2s_output
+    i2s_lrclk_pin:
+      number: GPIO7
+      allow_other_uses: true
+    i2s_bclk_pin:
+      number: GPIO8
+      allow_other_uses: true
+    # MCLK not needed — XVF3800 generates its own clock.
+    # i2s_mclk_pin:
+    #   number: GPIO9
+    #   allow_other_uses: true
+
+  - id: i2s_input
+    i2s_lrclk_pin:
+      number: GPIO7
+      allow_other_uses: true
+    i2s_bclk_pin:
+      number: GPIO8
+      allow_other_uses: true
+    # i2s_mclk_pin:
+    #   number: GPIO9
+    #   allow_other_uses: true
+
+microphone:
+  - platform: i2s_audio
+    id: i2s_mics
+    i2s_din_pin: GPIO43
+    adc_type: external
+    pdm: false
+    sample_rate: 48000
+    bits_per_sample: 32bit
+    i2s_mode: secondary
+    i2s_audio_id: i2s_input
+    channel: stereo
+
+speaker:
+  - platform: i2s_audio
+    id: i2s_audio_speaker
+    sample_rate: 48000
+    i2s_mode: secondary
+    i2s_dout_pin: GPIO44
+    bits_per_sample: 32bit
+    i2s_audio_id: i2s_output
+    dac_type: external
+    channel: stereo
+    timeout: never
+    buffer_duration: 100ms
+    audio_dac: aic3104_dac
+  - platform: mixer
+    id: mixing_speaker
+    output_speaker: i2s_audio_speaker
+    num_channels: 2
+    task_stack_in_psram: true
+    source_speakers:
+      - id: announcement_mixing_input
+        timeout: never
+      - id: media_mixing_input
+        timeout: never
+  - platform: resampler
+    id: announcement_resampling_speaker
+    output_speaker: announcement_mixing_input
+    sample_rate: 48000
+    bits_per_sample: 16
+  - platform: resampler
+    id: media_resampling_speaker
+    output_speaker: media_mixing_input
+    sample_rate: 48000
+    bits_per_sample: 16
+
+sendspin:
+  id: sendspin_hub
+  task_stack_in_psram: false
+
+http_request:
+  # Uncomment verify_ssl: false if TTS fails due to HA HTTPS certificate issues.
+  # Commonly needed on local HA installs without a trusted certificate.
+  verify_ssl: false
+  buffer_size_rx: 2048
+
+audio_file:
+  - id: mute_switch_on_sound
+    file: ${mute_switch_on_sound_file}
+  - id: mute_switch_off_sound
+    file: ${mute_switch_off_sound_file}
+  - id: timer_finished_sound
+    file: ${timer_finished_sound_file}
+  - id: wake_word_triggered_sound
+    file: ${wake_word_triggered_sound_file}
+  - id: error_cloud_expired
+    file: ${error_cloud_expired_sound_file}
+
+media_source:
+  - platform: audio_file
+    id: audio_file_announcement_source
+  - platform: http_request
+    id: http_announcement_source
+    buffer_size: 250000
+  - platform: http_request
+    id: http_media_source
+    buffer_size: 500000
+  - platform: sendspin
+    id: sendspin_media_source
+    fixed_delay: 480 microseconds
+
+media_player:
+  - platform: sendspin
+    id: sendspin_group_media_player
+  - platform: speaker_source
+    id: external_media_player
+    name: Media Player
+    announcement_pipeline:
+      format: FLAC
+      num_channels: 1
+      sample_rate: 48000
+      speaker: announcement_resampling_speaker
+      sources:
+        - audio_file_announcement_source
+        - http_announcement_source
+    media_pipeline:
+      format: FLAC
+      num_channels: 2
+      sample_rate: 48000
+      speaker: media_resampling_speaker
+      sources:
+        - http_media_source
+        - sendspin_media_source
+    volume_increment: 0.05
+    volume_min: 0.0
+    volume_max: 1.0
+    on_mute:
+      - delay: 100ms
+      - script.execute: control_leds_volume_changed
+    on_unmute:
+      - delay: 100ms
+      - script.execute: control_leds_volume_changed
+    on_volume:
+      if:
+        condition:
+          - lambda: return !id(init_in_progress);
+        then:
+          - delay: 100ms
+          - script.execute: control_leds_volume_changed
+    on_announcement:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 20
+          duration: 0.0s
+    on_state:
+      if:
+        condition:
+          and:
+            - switch.is_off: timer_ringing
+            - not:
+                voice_assistant.is_running:
+            - not:
+                media_player.is_announcing: external_media_player
+        then:
+          - mixer_speaker.apply_ducking:
+              id: media_mixing_input
+              decibel_reduction: 0
+              duration: 1.0s
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/formatBCE/esphome
+      ref: respeaker_microphone
+    components:
+      - i2s_audio
+    refresh: 0s
+  - source:
+      type: git
+      url: https://github.com/formatBCE/Respeaker-XVF3800-ESPHome-integration
+      ref: main
+    components:
+      - respeaker_xvf3800
+      - aic3104
+    refresh: 0s
+  - source:
+      # https://github.com/esphome/esphome/pull/14933
+      type: git
+      url: https://github.com/kahrendt/esphome
+      ref: 7a6cf5c8472b7e2fa18ee0fc314f66a80d249e32
+    components: [const, media_source, sendspin]
+  - source:
+      # https://github.com/esphome/esphome/pull/12429
+      type: git
+      url: https://github.com/esphome/esphome
+      ref: ff8ce89556748509d7ee8724e12d9d43d3c8c1e8
+    refresh: 0s
+    components: [http_request]
+
+respeaker_xvf3800:
+  id: respeaker
+  address: 0x2C
+  mute_switch:
+    id: mic_mute_switch
+    name: "Microphone Mute"
+    update_interval: 1s
+    on_turn_on:
+      - if:
+          condition:
+            and:
+              - lambda: return !id(init_in_progress);
+              - switch.is_on: mute_sound
+          then:
+            - script.execute:
+                id: play_sound
+                priority: false
+                sound_file: "mute_switch_on_sound"
+    on_turn_off:
+      - if:
+          condition:
+            and:
+              - lambda: return !id(init_in_progress);
+              - switch.is_on: mute_sound
+          then:
+            - script.execute:
+                id: play_sound
+                priority: false
+                sound_file: "mute_switch_off_sound"
+  dfu_version:
+    name: "Firmware Version"
+    update_interval: 120s
+  led_beam_sensor:
+    name: "Voice Beam Direction"
+    id: beam_direction
+    # Set internal: false to expose DoA direction as a sensor in HA.
+    internal: true
+  # Auto-updates XMOS chip to v1.0.7 on boot if a different version is detected.
+  # Comment out this entire firmware block to disable auto-updates.
+  firmware:
+    url: https://github.com/formatBCE/Respeaker-XVF3800-ESPHome-integration/raw/refs/heads/main/application_xvf3800_inthost-lr48-sqr-i2c-v1.0.7-release.bin
+    version: "1.0.7"
+    md5: 043a848f544ff2c7265ac19685daf5de
+
+audio_dac:
+  - platform: aic3104
+    id: aic3104_dac
+    i2c_id: internal_i2c
+
+micro_wake_word:
+  id: mww
+  microphone:
+    microphone: i2s_mics
+    channels: 1
+    # gain_factor: 4  # Uncomment to boost mic sensitivity in large rooms
+  stop_after_detection: false
+  models:
+    - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+      id: okay_nabu
+    - model: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/refs/heads/main/microwakeword/models/v2/kenobi.json
+      id: kenobi
+    - model: hey_jarvis
+      id: hey_jarvis
+    - model: hey_mycroft
+      id: hey_mycroft
+    - model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
+      id: stop
+      internal: true
+  vad:
+    probability_cutoff: 0.05
+  on_wake_word_detected:
+    - if:
+        condition:
+          switch.is_off: mic_mute_switch
+        then:
+          - lambda: |-
+              id(send_wake_word_event).execute(wake_word);
+          - if:
+              condition:
+                switch.is_on: timer_ringing
+              then:
+                - switch.turn_off: timer_ringing
+              else:
+                - if:
+                    condition:
+                      voice_assistant.is_running:
+                    then:
+                      voice_assistant.stop:
+                    else:
+                      - if:
+                          condition:
+                            media_player.is_announcing:
+                              id: external_media_player
+                          then:
+                            - media_player.stop:
+                                announcement: true
+                                id: external_media_player
+                          else:
+                            - if:
+                                condition:
+                                  switch.is_on: wake_sound
+                                then:
+                                  - script.execute:
+                                      id: play_sound
+                                      priority: true
+                                      sound_file: "wake_word_triggered_sound"
+                                  - delay: 300ms
+                            - voice_assistant.start:
+                                wake_word: !lambda "return wake_word;"
+
+select:
+  - platform: template
+    name: "Wake word sensitivity"
+    id: wake_word_sensitivity
+    optimistic: true
+    initial_option: Slightly sensitive
+    restore_value: true
+    entity_category: config
+    options:
+      - Slightly sensitive
+      - Moderately sensitive
+      - Very sensitive
+    on_value:
+      lambda: |-
+        if (x == "Slightly sensitive") {
+          id(okay_nabu).set_probability_cutoff(217);
+          id(hey_jarvis).set_probability_cutoff(247);
+          id(hey_mycroft).set_probability_cutoff(253);
+        } else if (x == "Moderately sensitive") {
+          id(okay_nabu).set_probability_cutoff(176);
+          id(hey_jarvis).set_probability_cutoff(235);
+          id(hey_mycroft).set_probability_cutoff(242);
+        } else if (x == "Very sensitive") {
+          id(okay_nabu).set_probability_cutoff(143);
+          id(hey_jarvis).set_probability_cutoff(212);
+          id(hey_mycroft).set_probability_cutoff(237);
+        }
+  - platform: logger
+    id: logger_select
+    name: Logger Level
+    disabled_by_default: true
+  - platform: template
+    optimistic: true
+    name: "Alarm action"
+    id: alarm_action
+    icon: mdi:bell-plus
+    options:
+      - "Play sound"
+      - "Send event"
+      - "Sound and event"
+    initial_option: "Play sound"
+    on_value:
+      then:
+        - lambda: |-
+            id(saved_alarm_action) = x;
+  - platform: template
+    name: "LED Ring Color Preset"
+    id: user_led_color_preset
+    icon: "mdi:palette"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: "Custom"
+    options:
+      - "Purple"
+      - "Blue"
+      - "Green"
+      - "Yellow"
+      - "Cyan"
+      - "White"
+      - "Orange"
+      - "Pink"
+      - "Custom"
+    on_value:
+      - lambda: |-
+          if (x == "Purple") {
+            id(user_led_ring_color_r) = 255.0f;
+            id(user_led_ring_color_g) = 0.0f;
+            id(user_led_ring_color_b) = 255.0f;
+          } else if (x == "Blue") {
+            id(user_led_ring_color_r) = 0.0f;
+            id(user_led_ring_color_g) = 0.0f;
+            id(user_led_ring_color_b) = 255.0f;
+          } else if (x == "Green") {
+            id(user_led_ring_color_r) = 0.0f;
+            id(user_led_ring_color_g) = 255.0f;
+            id(user_led_ring_color_b) = 0.0f;
+          } else if (x == "Yellow") {
+            id(user_led_ring_color_r) = 255.0f;
+            id(user_led_ring_color_g) = 255.0f;
+            id(user_led_ring_color_b) = 0.0f;
+          } else if (x == "Cyan") {
+            id(user_led_ring_color_r) = 0.0f;
+            id(user_led_ring_color_g) = 255.0f;
+            id(user_led_ring_color_b) = 255.0f;
+          } else if (x == "White") {
+            id(user_led_ring_color_r) = 255.0f;
+            id(user_led_ring_color_g) = 255.0f;
+            id(user_led_ring_color_b) = 255.0f;
+          } else if (x == "Orange") {
+            id(user_led_ring_color_r) = 255.0f;
+            id(user_led_ring_color_g) = 128.0f;
+            id(user_led_ring_color_b) = 0.0f;
+          } else if (x == "Pink") {
+            id(user_led_ring_color_r) = 255.0f;
+            id(user_led_ring_color_g) = 50.0f;
+            id(user_led_ring_color_b) = 200.0f;
+          }
+
+voice_assistant:
+  id: va
+  microphone:
+    microphone: i2s_mics
+    # channels: 0 uses the raw stereo channel for STT.
+    # XVF3800 hardware handles AEC and noise suppression before this point,
+    # so noise_suppression_level and auto_gain are left at 0.
+    channels: 0
+  media_player: external_media_player
+  micro_wake_word: mww
+  use_wake_word: false
+  noise_suppression_level: 0
+  auto_gain: 0 dbfs
+  volume_multiplier: 1
+  on_client_connected:
+    - if:
+        condition:
+          - lambda: return id(init_in_progress);
+          - switch.is_on: mic_mute_switch
+        then:
+          - switch.turn_off: mic_mute_switch
+    - lambda: id(init_in_progress) = false;
+    - micro_wake_word.start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - script.execute: control_leds
+  on_client_disconnected:
+    - voice_assistant.stop:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};
+    - script.execute: control_leds
+  on_error:
+    - if:
+        condition:
+          and:
+            - lambda: return !id(init_in_progress);
+            - lambda: return code != "duplicate_wake_up_detected";
+            - lambda: return code != "stt-no-text-recognized";
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_error_phase_id};
+          - script.execute: control_leds
+    - if:
+        condition:
+          - lambda: return code == "cloud-auth-failed";
+        then:
+          - script.execute:
+              id: play_sound
+              priority: true
+              sound_file: "error_cloud_expired"
+  on_start:
+    - mixer_speaker.apply_ducking:
+        id: media_mixing_input
+        decibel_reduction: 20
+        duration: 0.0s
+  on_listening:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+    - script.execute: control_leds
+  on_stt_vad_start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
+    - script.execute: control_leds
+  on_stt_vad_end:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+    - script.execute: control_leds
+  on_intent_progress:
+    - if:
+        condition:
+          lambda: 'return !x.empty();'
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+          - script.execute: control_leds
+          - script.execute: activate_stop_word_once
+  on_tts_start:
+    - if:
+        condition:
+          lambda: 'return id(voice_assistant_phase) != ${voice_assist_replying_phase_id};'
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+          - script.execute: control_leds
+          - script.execute: activate_stop_word_once
+  on_tts_end:
+    - lambda: |-
+        id(send_tts_uri_event).execute(x);
+  on_stt_end:
+    - lambda: |-
+        id(send_stt_text_event).execute(x);
+  on_end:
+    - wait_until:
+        not:
+          voice_assistant.is_running:
+    - mixer_speaker.apply_ducking:
+        id: media_mixing_input
+        decibel_reduction: 0
+        duration: 1.0s
+    - if:
+        condition:
+          lambda: return id(voice_assistant_phase) == ${voice_assist_error_phase_id};
+        then:
+          - delay: 1s
+    - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - script.execute: control_leds
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
+    - lambda: |
+        id(next_timer).publish_state(-1);
+        id(next_timer_name).publish_state("-");
+  on_timer_started:
+    - lambda: |
+        id(check_if_timers_active).execute();
+        if (id(is_timer_active)) {
+          id(fetch_first_active_timer).execute();
+          id(next_timer).publish_state(id(first_active_timer).seconds_left);
+          id(next_timer_name).publish_state(id(first_active_timer).name);
+        }
+    - script.execute: control_leds
+  on_timer_cancelled:
+    - lambda: |
+        id(check_if_timers_active).execute();
+        if (id(is_timer_active)) {
+          id(fetch_first_active_timer).execute();
+          id(next_timer).publish_state(id(first_active_timer).seconds_left);
+          id(next_timer_name).publish_state(id(first_active_timer).name);
+        } else {
+          id(next_timer).publish_state(-1);
+          id(next_timer_name).publish_state("-");
+        }
+    - script.execute: control_leds
+  on_timer_updated:
+    - lambda: |
+        id(check_if_timers_active).execute();
+        if (id(is_timer_active)) {
+          id(fetch_first_active_timer).execute();
+          id(next_timer).publish_state(id(first_active_timer).seconds_left);
+          id(next_timer_name).publish_state(id(first_active_timer).name);
+        }
+    - script.execute: control_leds
+  on_timer_tick:
+    - lambda: |
+        id(fetch_first_active_timer).execute();
+        int seconds_left = id(first_active_timer).seconds_left;
+        if (seconds_left % 5 == 0) {
+          id(next_timer).publish_state(seconds_left);
+        }
+        if (id(current_led_effect) == "timer_tick") {
+          id(control_leds_timer_ticking).execute();
+        }
+
+button:
+  - platform: factory_reset
+    id: factory_reset_button
+    name: "Factory Reset"
+    entity_category: diagnostic
+    internal: true
+  - platform: restart
+    id: restart_button
+    name: "Restart"
+    entity_category: config
+    disabled_by_default: true
+    icon: "mdi:restart"
+
+debug:
+  update_interval: 5s
