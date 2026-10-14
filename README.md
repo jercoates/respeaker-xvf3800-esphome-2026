@@ -1,10 +1,46 @@
-# ReSpeaker XVF3800 ESPHome — ESPHome 2026.3.x Compatible
+# ReSpeaker XVF3800 ESPHome Configs
 
-This is a working ESPHome YAML configuration for the **Seeed Studio ReSpeaker XVF3800 4-Mic Array** (with pre-soldered XIAO ESP32-S3), updated for compatibility with **ESPHome 2026.3.x**.
+[![Compile check](https://github.com/jercoates/respeaker-xvf3800-esphome-2026/actions/workflows/compile-check.yml/badge.svg)](https://github.com/jercoates/respeaker-xvf3800-esphome-2026/actions/workflows/compile-check.yml)
 
-It is based on the excellent work by [formatBCE](https://github.com/formatBCE/Respeaker-XVF3800-ESPHome-integration). The original configuration has several issues on ESPHome 2026.3.x due to breaking changes in the YAML parser and ESPHome API. This repo contains the fixes needed to get it compiling and running.
+Working ESPHome YAML configurations for the **Seeed Studio ReSpeaker XVF3800 4-Mic Array** (with pre-soldered XIAO ESP32-S3) as a Home Assistant voice satellite.
 
-Tested on **ESPHome 2026.3.3** with **Home Assistant** and local Whisper + Piper via Wyoming Satellite.
+They are based on the excellent work by [formatBCE](https://github.com/formatBCE/Respeaker-XVF3800-ESPHome-integration). This repo keeps one config for current ESPHome and the older configs for people who have not updated, along with a step-by-step setup guide.
+
+---
+
+## Which config to use
+
+Pick the file that matches your **ESPHome** version. What matters is the ESPHome version you compile with, not the Home Assistant version.
+
+| File | ESPHome | What it is |
+|---|---|---|
+| [`respeaker-xvf3800-shareable.yaml`](respeaker-xvf3800-shareable.yaml) | **2026.9.0 or later** | Current. A short device file that pulls everything else from formatBCE's remote packages, plus a wake word threshold slider. |
+| [`respeaker-xvf3800-2026.3-shareable.yaml`](respeaker-xvf3800-2026.3-shareable.yaml) | 2026.3.x | The original single-file config with the 2026.3.x fixes. Tested on ESPHome 2026.3.3. It does not build on ESPHome 2026.9. |
+
+Older configs stay in this repo for anyone on an older ESPHome. The sections further down (from [Installation](#installation) on) were written for the 2026.3 file.
+
+### The current config
+
+- **Setup is the same.** The XMOS firmware (Step 1), `secrets.yaml` (Step 2), power (Step 3) and the installation steps below all apply. Copy the current file instead of the 2026.3 one, and set `name` and `friendly_name` under `substitutions`.
+- **No workarounds needed.** formatBCE's upstream now compiles on current ESPHome without the changes listed under [What Was Changed From the Original](#what-was-changed-from-the-original), so the current file does not carry them.
+- **Upstream version.** `respeaker_ref` selects it. `main` follows upstream; a full commit SHA freezes the YAML, the C++ components and the XMOS firmware together.
+- **New from upstream since March.** A **Beam lock** switch (holds the mic beam on the direction of the wake word until the command ends, off by default), an **LED Ring** light entity, and **DSP route** / gain controls.
+- **Changing things.** To change anything that lives in the packages, override it from your device file with `!extend` or `!remove`. See [formatBCE's README](https://github.com/formatBCE/Respeaker-XVF3800-ESPHome-integration#change-the-configuration).
+
+### Wake word threshold slider
+
+The current config adds one thing that is not in formatBCE's packages: a **Wake word threshold** slider on the device page in Home Assistant. It sets how sure the wake word model must be before it triggers.
+
+| Slider | Effect |
+|---|---|
+| 0 (default) | Slider is off. The **Wake word sensitivity** dropdown is in charge. |
+| 1–99 | Overrides the dropdown for all four wake words. **Lower** triggers more easily and gives more false triggers. **Higher** is stricter. |
+
+For reference, the dropdown uses about 85–99 for "Slightly sensitive" and 56–93 for "Very sensitive", depending on the wake word. If you change the dropdown while the slider is above 0, the dropdown wins until you move the slider again or the device restarts.
+
+### Compile check
+
+The badge at the top shows whether the current config still compiles against the latest ESPHome release. The check runs every Monday and on every change to the config. If it is red, a recent ESPHome or upstream change has broken the build.
 
 ---
 

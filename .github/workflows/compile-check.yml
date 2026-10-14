@@ -1,0 +1,50 @@
+# Builds the current config against the latest ESPHome release, so a breaking
+# ESPHome or upstream change shows up here before a user reports it.
+#
+# Runs every Monday, on every change to the config, and on demand from the
+# Actions tab ("Run workflow"). If a run fails, GitHub emails the repo owner.
+name: Compile check
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  push:
+    paths:
+      - "respeaker-xvf3800-shareable.yaml"
+      - ".github/workflows/compile-check.yml"
+  pull_request:
+    paths:
+      - "respeaker-xvf3800-shareable.yaml"
+      - ".github/workflows/compile-check.yml"
+
+jobs:
+  compile:
+    name: Compile on latest ESPHome
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install latest ESPHome
+        run: |
+          pip install --upgrade esphome
+          esphome version
+
+      # The config reads four secrets. These are placeholders for the build
+      # only, nothing is flashed.
+      - name: Write placeholder secrets
+        run: |
+          cat > secrets.yaml <<'SECRETS'
+          wifi_ssid: "ci-placeholder"
+          wifi_password: "ci-placeholder"
+          ota_password: "ci-placeholder"
+          api_key: "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE="
+          SECRETS
+
+      - name: Compile
+        run: esphome compile respeaker-xvf3800-shareable.yaml

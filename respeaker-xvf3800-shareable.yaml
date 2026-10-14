@@ -1,0 +1,143 @@
+# =============================================================================
+# ReSpeaker XVF3800 ESPHome Configuration
+# Compatible with: ESPHome 2026.9.0 or later
+# Hardware: Seeed Studio ReSpeaker XVF3800 4-Mic Array with XIAO ESP32-S3
+# Based on: formatBCE Respeaker XVF3800 Satellite
+# https://github.com/formatBCE/Respeaker-XVF3800-ESPHome-integration
+#
+# This file holds only the settings that belong to your device. Everything
+# else (hardware, voice assistant, LEDs, timers) comes from formatBCE's remote
+# packages, which ESPHome downloads at compile time.
+#
+# The 2026.3.x workarounds from the older config in this repo (publish_state
+# lambdas, C++ execute() calls, global string buffers) are no longer needed.
+# Upstream compiles cleanly on current ESPHome without them.
+#
+# Before you build this file, make sure secrets.yaml contains wifi_ssid,
+# wifi_password, ota_password and api_key.
+# =============================================================================
+
+substitutions:
+  # ---------------------------------------------------------------------------
+  # Change these for each device
+  # ---------------------------------------------------------------------------
+  name: respeaker-xvf3800
+  friendly_name: ReSpeaker XVF3800
+
+  # ---------------------------------------------------------------------------
+  # Version of formatBCE's repo to build from. This one value selects the YAML
+  # packages, the C++ components and the XMOS DSP firmware together.
+  #
+  # "main" follows upstream, which is re-checked against each ESPHome release.
+  # To freeze the device on a known version, use a full commit SHA instead.
+  # The commit below is upstream main as of 2026-10-11 (needs ESPHome 2026.9.0).
+  # ---------------------------------------------------------------------------
+  respeaker_ref: main
+  # respeaker_ref: 542a05d44b6eb2c646a6ba0acd3e0cf2e6edcfab
+
+  # ---------------------------------------------------------------------------
+  # Set to "true" if your WiFi SSID is hidden (not broadcast)
+  # ---------------------------------------------------------------------------
+  hidden_ssid: "false"
+
+  # ---------------------------------------------------------------------------
+  # Sound files default to the Home Assistant Voice PE sounds. To use your own,
+  # uncomment and point at your own .flac file. The other names are listed in
+  # packages/voice-assistant.yaml upstream.
+  # ---------------------------------------------------------------------------
+  # wake_word_triggered_sound_file: https://example.com/my_wake_sound.flac
+  # timer_finished_sound_file: https://example.com/my_timer_sound.flac
+
+packages:
+  respeaker:
+    url: https://github.com/formatBCE/Respeaker-XVF3800-ESPHome-integration
+    ref: ${respeaker_ref}
+    refresh: 1d
+    # All five files are required. They depend on each other.
+    files:
+      - packages/base.yaml
+      - packages/hardware.yaml
+      - packages/voice-assistant.yaml
+      - packages/leds.yaml
+      - packages/timers-alarm.yaml
+
+# A remote package cannot read secrets, so the credentials go here.
+# ESPHome merges these blocks with the matching blocks in the packages.
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+    password: !secret ota_password
+
+# -----------------------------------------------------------------------------
+# Wake word threshold slider (not in formatBCE's packages)
+# -----------------------------------------------------------------------------
+# Adds a "Wake word threshold" slider to the device page in Home Assistant.
+# It sets how sure the wake word model must be before it triggers.
+#
+#   0       Slider is off. The "Wake word sensitivity" dropdown is in charge.
+#   1-99    Overrides the dropdown. LOWER = triggers more easily (and gives
+#           more false triggers). HIGHER = stricter.
+#
+# For reference, the dropdown uses about 85-99 for "Slightly sensitive" and
+# 56-93 for "Very sensitive", depending on the wake word.
+#
+# The value applies to all four wake words (Okay Nabu, Hey Jarvis, Hey Mycroft,
+# Kenobi). If you change the dropdown while the slider is above 0, the dropdown
+# wins until you move the slider again or the device restarts.
+# -----------------------------------------------------------------------------
+number:
+  - platform: template
+    id: wake_word_threshold
+    name: "Wake word threshold"
+    icon: "mdi:tune-variant"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    min_value: 0
+    max_value: 99
+    step: 1
+    unit_of_measurement: "%"
+    mode: slider
+    on_value:
+      - script.execute: apply_wake_word_threshold
+
+script:
+  - id: apply_wake_word_threshold
+    then:
+      - lambda: |-
+          float threshold = id(wake_word_threshold).state;
+          if (threshold >= 1.0f) {
+            // Cutoffs are a quantized uint8 value: 0-255 maps to 0.0-1.0
+            uint8_t cutoff = (uint8_t) (threshold * 2.55f);
+            id(okay_nabu).set_probability_cutoff(cutoff);
+            id(hey_jarvis).set_probability_cutoff(cutoff);
+            id(hey_mycroft).set_probability_cutoff(cutoff);
+            id(kenobi).set_probability_cutoff(cutoff);
+          } else {
+            // Slider is off. Give Kenobi its own default back, then run the
+            // dropdown again so it sets the other three.
+            id(kenobi).set_probability_cutoff(id(kenobi).get_default_probability_cutoff());
+            auto index = id(wake_word_sensitivity).active_index();
+            if (index.has_value()) {
+              auto call = id(wake_word_sensitivity).make_call();
+              call.set_index(*index);
+              call.perform();
+            }
+          }
+
+# The dropdown and the slider both restore their saved values at boot, in no
+# fixed order. Apply the slider once more after both, so it wins when it is on.
+esphome:
+  on_boot:
+    - priority: -100
+      then:
+        - script.execute: apply_wake_word_threshold
